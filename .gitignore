@@ -1,0 +1,5 @@
+noise_dataset
+*.tar
+*.gz
+SpeechCommands
+.venv*
