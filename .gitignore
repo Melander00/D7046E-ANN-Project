@@ -3,3 +3,7 @@ noise_dataset
 *.gz
 SpeechCommands
 .venv*
+
+__pycache__
+
+precompute

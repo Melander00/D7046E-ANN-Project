@@ -104,6 +104,16 @@ class SpeechCommandsWithTransform(Dataset):
         self.indices = indices
         self.transform = transform
 
+        # Extract labels from folder names (safe method)
+        labels = sorted(
+            list(set(
+                path.split(os.sep)[-2]
+                for path in base_dataset._walker
+            ))
+        )
+
+        self.label_to_index = {label: i for i, label in enumerate(labels)}
+
     def __len__(self):
         return len(self.indices)
 
@@ -116,7 +126,39 @@ class SpeechCommandsWithTransform(Dataset):
         if self.transform:
             waveform = self.transform(waveform)
 
+        label = self.label_to_index[label]
+        label = torch.tensor(label, dtype=torch.long)
+
         return waveform, label
+
+# Force each entry to be exactly 16000 samples in length.
+class FixAudioLength(nn.Module):
+    def __init__(self, target_length=16000):
+        super().__init__()
+        self.target_length = target_length
+
+    def forward(self, waveform):
+        length = waveform.shape[1]
+
+        if length > self.target_length:
+            waveform = waveform[:, :self.target_length]
+        elif length < self.target_length:
+            pad_amount = self.target_length - length
+            waveform = F.pad(waveform, (0, pad_amount))
+
+        return waveform
+
+class PrecomputedMelDataset(Dataset):
+    """Dataset that loads precomputed mel-spectrograms and labels from disk"""
+    def __init__(self, mel_file, label_file):
+        self.mels = torch.load(mel_file)
+        self.labels = torch.load(label_file)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.mels[idx], self.labels[idx]
 
 
 noise_dataset = NoiseDataset("./noise_dataset")
@@ -124,7 +166,11 @@ speech_dataset = torchaudio.datasets.SPEECHCOMMANDS("./", download=True)
 
 # Splits the speech dataset into train, validation and test subsets.
 def prepare_plain_datasets(splits = [0.7, 0.15, 0.15]):
-    generator = torch.Generator().manual_seed(1)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    print(f"Generator device={device}")
+
+    generator = torch.Generator(device).manual_seed(1)
     
     train_subset, val_subset, test_subset = torch.utils.data.random_split(
         speech_dataset,
@@ -169,38 +215,140 @@ def prepare_loaders(
 
 
 # Applies Mel-Spectragram on the train subset and returns loaders.
-def prepare_spectragram_loaders(
-        noise_alpha = 0, 
-        batch_size = 1000, 
-        n_fft = 1024,
-        hop_length = 512,
-        n_mels = 64, 
-):
-    """
-    Prepares loaders with a Mel-Spectragram transform.
-    """
-    subsets = prepare_plain_datasets()
+# def prepare_spectragram_loaders(
+#         noise_alpha = 0, 
+#         batch_size = 1000, 
+#         n_fft = 1024,
+#         hop_length = 512,
+#         n_mels = 64, 
+# ):
+#     """
+#     Prepares loaders with a Mel-Spectragram transform.
+#     """
+#     subsets = prepare_plain_datasets()
 
-    train_transforms = nn.Sequential(
-        RandomNoise(noise_dataset, noise_alpha),
-        transforms.MelSpectrogram(
+#     train_transforms = nn.Sequential(
+#         RandomNoise(noise_dataset, noise_alpha),
+#         FixAudioLength(16000),
+#         transforms.MelSpectrogram(
+#             sample_rate=16000,
+#             n_fft=n_fft,
+#             n_mels=n_mels,
+#             hop_length=hop_length,
+#         )
+#     )
+
+#     val_test_transforms = nn.Sequential(
+#         FixAudioLength(16000),
+#         transforms.MelSpectrogram(
+#             sample_rate=16000,
+#             n_fft=n_fft,
+#             n_mels=n_mels,
+#             hop_length=hop_length,
+#         )
+#     )
+
+#     return prepare_loaders(
+#         subsets, 
+#         train_transforms=train_transforms, 
+#         val_test_transforms=val_test_transforms,
+#         batch_size=batch_size
+#     )
+
+def prepare_spectrogram_loaders(
+        batch_size=100,
+        n_fft=1024,
+        hop_length=512,
+        n_mels=64,
+        noise_alpha=0,
+        precompute=False,
+        precompute_dir="./precompute"
+    ):
+    """
+    Prepare train/val/test loaders with optional precompute.
+    If precompute=True, Mel-spectrograms are computed once and saved to disk.
+    """
+    os.makedirs(precompute_dir, exist_ok=True)
+    train_file = os.path.join(precompute_dir, f"train_mels_{noise_alpha}.pt")
+    val_file = os.path.join(precompute_dir, f"val_mels_{noise_alpha}.pt")
+    test_file = os.path.join(precompute_dir, f"test_mels_{noise_alpha}.pt")
+    train_labels_file = os.path.join(precompute_dir, f"train_labels_{noise_alpha}.pt")
+    val_labels_file = os.path.join(precompute_dir, f"val_labels_{noise_alpha}.pt")
+    test_labels_file = os.path.join(precompute_dir, f"test_labels_{noise_alpha}.pt")
+
+    if precompute and all(os.path.exists(f) for f in [
+        train_file, val_file, test_file,
+        train_labels_file, val_labels_file, test_labels_file
+    ]):
+        print("Loading precomputed Mel-spectrograms from disk...")
+        train_dataset = PrecomputedMelDataset(train_file, train_labels_file)
+        val_dataset = PrecomputedMelDataset(val_file, val_labels_file)
+        test_dataset = PrecomputedMelDataset(test_file, test_labels_file)
+    else:
+        print("Computing Mel-spectrograms (this may take a while)...")
+        
+        train_subset, val_subset, test_subset = prepare_plain_datasets()
+        
+        noise_transform = RandomNoise(noise_dataset, noise_alpha)
+        fix_length_transform = FixAudioLength(16000)
+        mel_transform = transforms.MelSpectrogram(
             sample_rate=16000,
             n_fft=n_fft,
             n_mels=n_mels,
             hop_length=hop_length,
         )
-    )
 
-    val_test_transforms = nn.Sequential(
-        transforms.MelSpectrogram()
-    )
+        all_labels = sorted(
+            list(set(
+                path.split(os.sep)[-2]
+                for path in speech_dataset._walker
+            ))
+        )
 
-    return prepare_loaders(
-        subsets, 
-        train_transforms=train_transforms, 
-        val_test_transforms=val_test_transforms,
-        batch_size=batch_size
-    )
+        label2idx = {label: i for i, label in enumerate(all_labels)}
+
+        def compute_mels(subset, apply_noise):
+            mels, labels = [], []
+            nr = 1
+            for waveform, sample_rate, label, *_ in (speech_dataset[i] for i in subset.indices):
+                if nr % 100 == 0:
+                    print(f"\rComputing {nr}/{len(subset.indices)}", end="")
+                # Apply optional noise
+                if apply_noise:
+                    waveform = noise_transform(waveform)
+                waveform = fix_length_transform(waveform)
+                mel = mel_transform(waveform)
+                mels.append(mel)
+                labels.append(label2idx[label])
+                nr += 1
+            print("")
+            return torch.stack(mels), torch.tensor(labels, dtype=torch.long)
+
+        print("Computing Training Mels")
+        train_mels, train_labels = compute_mels(train_subset, apply_noise=True)
+        print("Computing Validation Mels")
+        val_mels, val_labels = compute_mels(val_subset, apply_noise=False)
+        print("Computing Test Mels")
+        test_mels, test_labels = compute_mels(test_subset, apply_noise=False)
+
+        if precompute:
+            torch.save(train_mels, train_file)
+            torch.save(train_labels, train_labels_file)
+            torch.save(val_mels, val_file)
+            torch.save(val_labels, val_labels_file)
+            torch.save(test_mels, test_file)
+            torch.save(test_labels, test_labels_file)
+            print(f"Saved precomputed datasets to {precompute_dir}")
+
+        train_dataset = torch.utils.data.TensorDataset(train_mels, train_labels)
+        val_dataset = torch.utils.data.TensorDataset(val_mels, val_labels)
+        test_dataset = torch.utils.data.TensorDataset(test_mels, test_labels)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader, test_loader
 
 
 # Returns loaders with raw audio waveforms.
@@ -211,10 +359,12 @@ def prepare_raw_loaders(noise_alpha = 0, batch_size = 1000):
     subsets = prepare_plain_datasets()
 
     train_transforms = nn.Sequential(
-        RandomNoise(noise_dataset, noise_alpha)
+        RandomNoise(noise_dataset, noise_alpha),
+        FixAudioLength(16000),
     )
 
     val_test_transforms = nn.Sequential(
+        FixAudioLength(16000),
     )
 
     return prepare_loaders(
