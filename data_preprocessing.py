@@ -2,18 +2,15 @@
 import os
 import random
 
-import sounddevice as sd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
-from torch import Tensor
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 from torchaudio import transforms
 
-# torchaudio.set_audio_backend("soundfile")
 
-# Noise Dataset
+# Noise Dataset. Helper class to allow torch to load the noise audio files as tensors and resample.
 class NoiseDataset(Dataset):
     def __init__(self, noise_dir, target_sample_rate = 16e3):
         self.files = [
@@ -39,89 +36,190 @@ class NoiseDataset(Dataset):
         return waveform
     
 
-# Data Preprocessing
+# Noisify Transform. Helper class to allow the speech dataset to be mixed with the noise based on an alpha value.
+class RandomNoise(torch.nn.Module):
+    def __init__(self, noise_dataset, alpha, random_start = False, p = 1):
+        """
+        noise_dataset: Dataset to sample noise from
+        alpha: noise RMS relative to speech RMS
+        random_start: random crop position in noise clip
+        p: probability of applying noise (for augmentation)
+        """
+
+        super().__init__()
+        self.noise_dataset = noise_dataset
+        self.alpha = alpha
+        self.random_start = random_start
+        self.p = p
+
+    def forward(self, speech_clip):
+        # Probability check
+        if torch.rand(1).item() > self.p:
+            return speech_clip
+
+        # Get random noise
+        noise_clip = self.noise_dataset[
+            random.randint(0, len(self.noise_dataset) - 1)
+        ]
+
+        # Ensure Mono
+        if speech_clip.shape[0] > 1:
+            speech_clip = torch.mean(speech_clip, dim=0, keepdim=True)
+        if noise_clip.shape[0] > 1:
+            noise_clip = torch.mean(noise_clip, dim=0, keepdim=True)
+
+        # Clip Lengths
+        speech_len = speech_clip.shape[1]
+        noise_len = noise_clip.shape[1]
+
+        # Crop/Pad Noise
+        if noise_len > speech_len:
+            random_start = random.randint(0, noise_len - speech_len) if self.random_start else 0
+            noise_clip = noise_clip[:, random_start:random_start + speech_len]
+        elif noise_len < speech_len:
+            noise_clip = F.pad(noise_clip, (0, speech_len - noise_len))
+
+
+        # RMS
+        speech_rms = torch.sqrt(torch.mean(speech_clip ** 2))
+        noise_rms = torch.sqrt(torch.mean(noise_clip ** 2))
+
+        # Avoid zero division
+        if noise_rms == 0:
+            return speech_clip
+        
+        # Compute the noise power.
+        desired_rms = self.alpha * speech_rms
+        noise_clip = noise_clip * (desired_rms / noise_rms)
+
+        # Mix speech and noise
+        merged = speech_clip + noise_clip
+
+        return merged
+
+# Speech Subset. Helper class that applies transforms on the speech commands subsets.
+class SpeechCommandsWithTransform(Dataset):
+    def __init__(self, base_dataset, indices, transform=None):
+        self.base_dataset = base_dataset
+        self.indices = indices
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        real_idx = self.indices[idx]
+
+        waveform, sample_rate, label, speaker_id, utterance = \
+            self.base_dataset[real_idx]
+
+        if self.transform:
+            waveform = self.transform(waveform)
+
+        return waveform, label
+
+
 noise_dataset = NoiseDataset("./noise_dataset")
 speech_dataset = torchaudio.datasets.SPEECHCOMMANDS("./", download=True)
 
-def merge_speech_noise(speech_clip: Tensor, noise_clip: Tensor, alpha: float, random_start = False):
-    """Merges the speech clip with the noise based on the alpha value [0,1]"""
-
-    # Ensure Mono
-    if speech_clip.shape[0] > 1:
-        speech_clip = torch.mean(speech_clip, dim=0, keepdim=True)
-    if noise_clip.shape[0] > 1:
-        noise_clip = torch.mean(noise_clip, dim=0, keepdim=True)
-
-    # Clip Lengths
-    speech_len = speech_clip.shape[1]
-    noise_len = noise_clip.shape[1]
-
-    # Crop/Pad Noise
-    if noise_len > speech_len:
-        random_start = random.randint(0, noise_len - speech_len) if random_start else 0
-        noise_clip = noise_clip[:, random_start:random_start + speech_len]
-    elif noise_len < speech_len:
-        noise_clip = F.pad(noise_clip, (0, speech_len - noise_len))
-
-
-    # RMS
-    speech_rms = torch.sqrt(torch.mean(speech_clip ** 2))
-    noise_rms = torch.sqrt(torch.mean(noise_clip ** 2))
-
-    # Avoid zero division
-    if noise_rms == 0:
-        return speech_clip
+# Splits the speech dataset into train, validation and test subsets.
+def prepare_plain_datasets(splits = [0.7, 0.15, 0.15]):
+    generator = torch.Generator().manual_seed(1)
     
-    desired_rms = alpha * speech_rms
-    noise_clip = noise_clip * (desired_rms / noise_rms)
+    train_subset, val_subset, test_subset = torch.utils.data.random_split(
+        speech_dataset,
+        splits,
+        generator=generator
+    )
 
-    merged = speech_clip + noise_clip
+    return train_subset, val_subset, test_subset
 
-    return merged
+# Creates dataloaders with transforms from subsets.
+def prepare_loaders(
+        subsets, 
+        train_transforms = nn.Sequential(), 
+        val_test_transforms = nn.Sequential(), 
+        batch_size = 1000
+):
+    train_subset, val_subset, test_subset = subsets
 
+    train_set = SpeechCommandsWithTransform(
+        speech_dataset,
+        train_subset.indices,
+        transform=train_transforms
+    )
+    
+    val_set = SpeechCommandsWithTransform(
+        speech_dataset,
+        val_subset.indices,
+        transform=val_test_transforms
+    )
+    
+    test_set = SpeechCommandsWithTransform(
+        speech_dataset,
+        test_subset.indices,
+        transform=val_test_transforms
+    )
 
-   
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False)
 
-# # Manual mixing of speech and noise, for example:
-# # 10% = 90% speech + 10% noise
-# # TODO: check if this is the correct way to doit
-# def mix_percent(speech, noise, percent):
-#     alpha = percent / 100.0
-
-#     # match length
-#     if noise.size(1) < speech.size(1):
-#         noise = noise.repeat(1, speech.size(1)//noise.size(1)+1)
-#     noise = noise[:, :speech.size(1)]
-
-#     mixed = (1 - alpha) * speech + alpha * noise
-
-#     # avoid clipping
-#     mixed = mixed / mixed.abs().max().clamp(min=1.0)
-
-#     return mixed
-
-# def test_mix():
-#     speech = torchaudio.datasets.SPEECHCOMMANDS
-#     #   noise =
-#     test = mix_percent(speech[1], noise[1], 10)
-
-# def noiseify_speech_dataset(speech_dataset, noise_dataset, noise_level = 0):
-#     pass
-
-def play_sound(clip: Tensor, sample_rate = 16000):
-    if clip.dim() == 2:
-        clip = clip.squeeze(0)
-    sd.play(clip.numpy(), sample_rate)
-    sd.wait()
+    return train_loader, val_loader, test_loader
 
 
-if __name__ == "__main__":
-    speech = speech_dataset[1][0]
-    noise = noise_dataset[1]
+# Applies Mel-Spectragram on the train subset and returns loaders.
+def prepare_spectragram_loaders(
+        noise_alpha = 0, 
+        batch_size = 1000, 
+        n_fft = 1024,
+        hop_length = 512,
+        n_mels = 64, 
+):
+    """
+    Prepares loaders with a Mel-Spectragram transform.
+    """
+    subsets = prepare_plain_datasets()
 
-    mixed = merge_speech_noise(speech, noise, 0)
+    train_transforms = nn.Sequential(
+        RandomNoise(noise_dataset, noise_alpha),
+        transforms.MelSpectrogram(
+            sample_rate=16000,
+            n_fft=n_fft,
+            n_mels=n_mels,
+            hop_length=hop_length,
+        )
+    )
 
-    print("playing sound")
-    play_sound(mixed)
-    print("done!")
+    val_test_transforms = nn.Sequential(
+        transforms.MelSpectrogram()
+    )
 
+    return prepare_loaders(
+        subsets, 
+        train_transforms=train_transforms, 
+        val_test_transforms=val_test_transforms,
+        batch_size=batch_size
+    )
+
+
+# Returns loaders with raw audio waveforms.
+def prepare_raw_loaders(noise_alpha = 0, batch_size = 1000):
+    """
+    Prepares loaders with raw audio waveforms.
+    """
+    subsets = prepare_plain_datasets()
+
+    train_transforms = nn.Sequential(
+        RandomNoise(noise_dataset, noise_alpha)
+    )
+
+    val_test_transforms = nn.Sequential(
+    )
+
+    return prepare_loaders(
+        subsets, 
+        train_transforms=train_transforms, 
+        val_test_transforms=val_test_transforms,
+        batch_size=batch_size
+    )
