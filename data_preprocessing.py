@@ -166,11 +166,7 @@ speech_dataset = torchaudio.datasets.SPEECHCOMMANDS("./", download=True)
 
 # Splits the speech dataset into train, validation and test subsets.
 def prepare_plain_datasets(splits = [0.7, 0.15, 0.15]):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    print(f"Generator device={device}")
-
-    generator = torch.Generator(device).manual_seed(1)
+    generator = torch.Generator().manual_seed(1)
     
     train_subset, val_subset, test_subset = torch.utils.data.random_split(
         speech_dataset,
