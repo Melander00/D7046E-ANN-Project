@@ -2,6 +2,7 @@ import argparse
 import os
 import random
 from typing import Dict, List, Optional, Tuple
+import sys
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
+import soundfile as sf
+
+# Patch torchaudio.load to use soundfile
+def _soundfile_load(filepath, *args, **kwargs):
+    data, samplerate = sf.read(filepath, dtype='float32')
+    if data.ndim == 1:
+        data = data.reshape(1, -1)
+    else:
+        data = data.T
+    return torch.from_numpy(data), samplerate
+
+torchaudio.load = _soundfile_load
+
 from sklearn.metrics import confusion_matrix
 from torch.utils.data import DataLoader, Dataset
 
@@ -24,7 +38,6 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 def set_worker_seed(worker_id: int):
-    # called by DataLoader workers
     seed = torch.initial_seed() % (2**32)
     random.seed(seed)
     np.random.seed(seed)
@@ -60,14 +73,30 @@ def mix_with_rms(speech: torch.Tensor, noise: torch.Tensor, alpha: float) -> tor
 def count_trainable_params(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+def in_notebook() -> bool:
+    try:
+        from IPython import get_ipython
+        shell = get_ipython().__class__.__name__
+        if shell == "ZMQInteractiveShell":
+            return True
+    except Exception:
+        pass
+    return any(arg.startswith("-f") or arg.startswith("--ip") for arg in sys.argv[1:])
 
 # -------------------------
 # ESC-50 Noise Sampler
 # -------------------------
 class ESC50NoiseSampler:
+    """
+    Expects official ESC-50 structure:
+      esc50_root/
+        audio/
+        meta/esc50
+    """
     def __init__(self, esc50_root: str, target_sr: int, clip_samples: int):
         csv_path = os.path.join(esc50_root, "meta", "esc50.csv")
         audio_dir = os.path.join(esc50_root, "audio")
+
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"ESC-50 CSV not found: {csv_path}")
         if not os.path.exists(audio_dir):
@@ -90,6 +119,7 @@ class ESC50NoiseSampler:
         """Return mono noise waveform shaped (1, clip_samples) at target_sr."""
         row = self.df.iloc[random.randint(0, len(self.df) - 1)]
         path = os.path.join(self.audio_dir, row["filename"])
+
         wav, sr = torchaudio.load(path)  # (C,T)
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)
@@ -107,12 +137,10 @@ class ESC50NoiseSampler:
 
         return torch.clamp(seg.unsqueeze(0), -1.0, 1.0)
 
-
 # -------------------------
 # Speech Commands dataset wrapper
 # -------------------------
 from torchaudio.datasets import SPEECHCOMMANDS
-
 
 class SpeechCommandsWrapped(Dataset):
     def __init__(
@@ -171,13 +199,13 @@ class SpeechCommandsWrapped(Dataset):
 
         wav = fix_length(wav, self.clip_samples)
 
+        # Optional noise mixing
         if self.noise_sampler is not None and self.noise_alpha > 0.0:
             noise = self.noise_sampler.sample()
             wav = mix_with_rms(wav, noise, self.noise_alpha)
 
         y = self.label_to_idx[label]
         return wav, y
-
 
 # -------------------------
 # Features: log-mel
@@ -210,12 +238,11 @@ class LogMelExtractor(nn.Module):
         wav_batch: (B,1,T) -> (B,1,n_mels,time)
         Includes per-sample normalization for stability.
         """
-        m = self.mel(wav_batch)           # power mel
+        m = self.mel(wav_batch)
         mdb = self.db(m + EPS)
         mean = mdb.mean(dim=(2, 3), keepdim=True)
         std = mdb.std(dim=(2, 3), keepdim=True).clamp_min(1e-4)
         return (mdb - mean) / std
-
 
 # -------------------------
 # CNN model
@@ -245,7 +272,6 @@ class CNNCommand(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.net(x).squeeze(-1).squeeze(-1)
         return self.fc(z)
-
 
 # -------------------------
 # Train / eval
@@ -324,35 +350,38 @@ def train(model: nn.Module, feat: nn.Module, train_loader: DataLoader, val_loade
         model.load_state_dict(best_state)
     return model
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--esc50_root",
         type=str,
-        default="/content/noise-dataset/ESC-50-master",
-        required=False,
-        help="Path to ESC-50 root folder (contains meta/ and audio/)."
+        default="C:/Users/Ägaren/Downloads/ESC-50-master/ESC-50-master",
+        help="Path to ESC-50 root (contains meta/esc50.csv and audio/). Default: C:/Users/Ägaren/Downloads/ESC-50-master/ESC-50-master"
     )
     parser.add_argument("--data_root", type=str, default="./data", help="Where SpeechCommands will be stored.")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=1337)
-
     parser.add_argument("--all_labels", action="store_true",
                         help="Use all labels in SpeechCommands subset (slower). Default uses 10-command subset.")
-    args = parser.parse_args()
+
+    if in_notebook():
+        args = parser.parse_args([])  # notebook-safe
+        print("Notebook detected: argparse ignored. You MUST run main() manually with parameters in script mode.")
+        print("Example (script): python cnn_speechcommands_esc50_noise_single_file.py --esc50_root /path/to/ESC-50-master")
+        return
+    else:
+        args = parser.parse_args()
 
     set_seed(args.seed)
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Device:", device)
 
     target_sr = 16000
     clip_samples = 16000
 
-    # Recommended 10 commands (fast + usually >=75% clean accuracy)
+    # Recommended subset
     allowed_labels = None
     if not args.all_labels:
         allowed_labels = ["yes", "no", "up", "down", "left", "right", "on", "off", "stop", "go"]
@@ -366,7 +395,6 @@ def main():
     test_clean = SpeechCommandsWrapped(args.data_root, "testing", target_sr, clip_samples,
                                       allowed_labels=allowed_labels, noise_sampler=None, noise_alpha=0.0)
 
-    # Ensure label mapping consistent across splits
     if train_clean.label_to_idx != val_clean.label_to_idx or train_clean.label_to_idx != test_clean.label_to_idx:
         raise RuntimeError("Label mappings differ across splits; ensure allowed_labels is consistent.")
 
@@ -388,7 +416,6 @@ def main():
     train_loader = make_loader(train_clean, shuffle=True)
     val_loader = make_loader(val_clean, shuffle=False)
 
-    # Feature extractor + model
     feat = LogMelExtractor(
         sample_rate=target_sr,
         n_fft=400,
@@ -401,15 +428,10 @@ def main():
     model = CNNCommand(num_classes).to(device)
     print("CNN trainable params:", count_trainable_params(model))
 
-    # Train on clean
     model = train(model, feat, train_loader, val_loader, epochs=args.epochs, lr=args.lr, device=device)
 
-    # Evaluate on noise levels
-    noise_levels = {
-        "clean_0": 0.0,
-        "noise_10": 0.10,
-        "noise_50": 0.50,
-    }
+    # Evaluate: 0%, 10%, 50% noise
+    noise_levels = {"clean_0": 0.0, "noise_10": 0.10, "noise_50": 0.50}
 
     for name, alpha in noise_levels.items():
         test_ds = SpeechCommandsWrapped(
@@ -425,7 +447,6 @@ def main():
             raise RuntimeError("Test label mapping mismatch.")
 
         test_loader = make_loader(test_ds, shuffle=False)
-
         loss, acc, ys, preds = evaluate(model, feat, test_loader, device)
         cm = confusion_matrix(ys, preds, labels=list(range(num_classes)))
 
@@ -435,9 +456,8 @@ def main():
         print("Confusion matrix (rows=true, cols=pred):")
         print(cm)
 
-    # Requirement reminder
     print("\nRequirement check:")
-    print("- If clean_0 accuracy < 0.75, try: --epochs 30-40, or keep 10-command subset (default).")
+    print("- Clean (alpha=0.0) test accuracy should be >= 0.75. If not, try --epochs 30-40.")
 
 if __name__ == "__main__":
     main()
