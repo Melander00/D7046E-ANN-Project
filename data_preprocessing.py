@@ -161,7 +161,7 @@ class PrecomputedMelDataset(Dataset):
         return self.mels[idx], self.labels[idx]
 
 
-noise_dataset = NoiseDataset("./noise_dataset")
+noise_dataset = NoiseDataset("./noise_dataset/audio") #NOTE: filepath is changed for my pc so edit it for urs if u wanna run the model
 speech_dataset = torchaudio.datasets.SPEECHCOMMANDS("./", download=True)
 
 # Splits the speech dataset into train, validation and test subsets.
@@ -262,7 +262,6 @@ def prepare_spectrogram_loaders(
     ):
     """
     Prepare train/val/test loaders with optional precompute.
-    If precompute=True, Mel-spectrograms are computed once and saved to disk.
     """
     os.makedirs(precompute_dir, exist_ok=True)
     train_file = os.path.join(precompute_dir, f"train_mels_{noise_alpha}.pt")
@@ -294,22 +293,25 @@ def prepare_spectrogram_loaders(
             hop_length=hop_length,
         )
 
-        all_labels = sorted(
-            list(set(
-                path.split(os.sep)[-2]
-                for path in speech_dataset._walker
-            ))
-        )
-
-        label2idx = {label: i for i, label in enumerate(all_labels)}
+        # --- UPDATED SECTION START ---
+        # Explicitly define the 10 target keywords used in the CNN model
+        target_labels = ['down', 'go', 'left', 'no', 'off', 'on', 'right', 'stop', 'up', 'yes']
+        label2idx = {label: i for i, label in enumerate(target_labels)}
+        # --- UPDATED SECTION END ---
 
         def compute_mels(subset, apply_noise):
             mels, labels = [], []
             nr = 1
             for waveform, sample_rate, label, *_ in (speech_dataset[i] for i in subset.indices):
+                # --- ADDED FILTERING START ---
+                # Only process if the word is in our 10-target list
+                if label not in target_labels:
+                    continue
+                # --- ADDED FILTERING END ---
+
                 if nr % 100 == 0:
                     print(f"\rComputing {nr}/{len(subset.indices)}", end="")
-                # Apply optional noise
+                
                 if apply_noise:
                     waveform = noise_transform(waveform)
                 waveform = fix_length_transform(waveform)
@@ -325,7 +327,7 @@ def prepare_spectrogram_loaders(
         print("Computing Validation Mels")
         val_mels, val_labels = compute_mels(val_subset, apply_noise=False)
         print("Computing Test Mels")
-        test_mels, test_labels = compute_mels(test_subset, apply_noise=False)
+        test_mels, test_labels = compute_mels(test_subset, apply_noise=True)
 
         if precompute:
             torch.save(train_mels, train_file)
