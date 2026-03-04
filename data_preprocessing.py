@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from torchaudio import transforms
 
 
@@ -161,11 +161,50 @@ class PrecomputedMelDataset(Dataset):
         return self.mels[idx], self.labels[idx]
 
 
-noise_dataset = NoiseDataset("./noise_dataset/audio") #NOTE: filepath is changed for my pc so edit it for urs if u wanna run the model
-speech_dataset = torchaudio.datasets.SPEECHCOMMANDS("./", download=True)
+
 
 # Splits the speech dataset into train, validation and test subsets.
-def prepare_plain_datasets(splits = [0.7, 0.15, 0.15]):
+def prepare_plain_datasets(splits = [0.7, 0.15, 0.15], target_labels = None, noise_dataset_path = "./noise_dataset/audio"):
+    noise_dataset = NoiseDataset(noise_dataset_path) #NOTE: filepath is changed for my pc so edit it for urs if u wanna run the model
+    speech_dataset = torchaudio.datasets.SPEECHCOMMANDS("./", download=True)
+
+    if target_labels is not None:
+        print("Filtering...")
+        indices = [
+            i for i, path in enumerate(speech_dataset._walker)
+            if os.path.normpath(path).split(os.sep)[-2] in target_labels
+        ]
+
+        # all_labels = sorted(
+        #     list(set(
+        #         path.split(os.sep)[-2]
+        #         for path in speech_dataset._walker
+        #     ))
+        # )
+
+        speech_dataset = Subset(speech_dataset, indices)
+        print("Filtering complete")
+
+    # if target_labels is not None:
+    #     indices = [
+    #         i for i in range(len(speech_dataset))
+    #         if speech_dataset[i][2] in target_labels
+    #     ]
+    #     speech_dataset = Subset(speech_dataset, indices)
+    # if target_labels is not None:
+    #     print("Filtering dataset")
+    #     # Filter dataset to keep only target labels
+    #     filtered_data = []
+
+    #     for i in range(len(speech_dataset)):
+    #         waveform, sample_rate, label, speaker_id, utterance_number = speech_dataset[i]
+
+    #         if label in target_labels:
+    #             filtered_data.append((waveform, sample_rate, label, speaker_id, utterance_number))
+
+    #     speech_dataset = filtered_data  # replace dataset with filtered version
+    #     print("Filtering complete")
+
     generator = torch.Generator().manual_seed(1)
     
     train_subset, val_subset, test_subset = torch.utils.data.random_split(
@@ -174,7 +213,7 @@ def prepare_plain_datasets(splits = [0.7, 0.15, 0.15]):
         generator=generator
     )
 
-    return train_subset, val_subset, test_subset
+    return speech_dataset, noise_dataset, train_subset, val_subset, test_subset
 
 # Creates dataloaders with transforms from subsets.
 def prepare_loaders(
@@ -183,7 +222,7 @@ def prepare_loaders(
         val_test_transforms = nn.Sequential(), 
         batch_size = 1000
 ):
-    train_subset, val_subset, test_subset = subsets
+    speech_dataset, noise_dataset, train_subset, val_subset, test_subset = subsets
 
     train_set = SpeechCommandsWithTransform(
         speech_dataset,
@@ -258,18 +297,26 @@ def prepare_spectrogram_loaders(
         n_mels=64,
         noise_alpha=0,
         precompute=False,
-        precompute_dir="./precompute"
+        precompute_dir="./precompute",
+        target_labels=None,
+        dataset_split=[0.7,0.15,0.15],
+        noise_dataset_path="./noise_dataset/audio",
+        apply_noise_to_val_test=True
     ):
     """
     Prepare train/val/test loaders with optional precompute.
     """
     os.makedirs(precompute_dir, exist_ok=True)
-    train_file = os.path.join(precompute_dir, f"train_mels_{noise_alpha}.pt")
-    val_file = os.path.join(precompute_dir, f"val_mels_{noise_alpha}.pt")
-    test_file = os.path.join(precompute_dir, f"test_mels_{noise_alpha}.pt")
-    train_labels_file = os.path.join(precompute_dir, f"train_labels_{noise_alpha}.pt")
-    val_labels_file = os.path.join(precompute_dir, f"val_labels_{noise_alpha}.pt")
-    test_labels_file = os.path.join(precompute_dir, f"test_labels_{noise_alpha}.pt")
+
+    label_append = "all" if target_labels is None else len(target_labels)
+    name_append = f"{float(noise_alpha)}_{label_append}"
+
+    train_file = os.path.join(precompute_dir, f"train_mels_{name_append}.pt")
+    val_file = os.path.join(precompute_dir, f"val_mels_{name_append}.pt")
+    test_file = os.path.join(precompute_dir, f"test_mels_{name_append}.pt")
+    train_labels_file = os.path.join(precompute_dir, f"train_labels_{name_append}.pt")
+    val_labels_file = os.path.join(precompute_dir, f"val_labels_{name_append}.pt")
+    test_labels_file = os.path.join(precompute_dir, f"test_labels_{name_append}.pt")
 
     if precompute and all(os.path.exists(f) for f in [
         train_file, val_file, test_file,
@@ -282,7 +329,11 @@ def prepare_spectrogram_loaders(
     else:
         print("Computing Mel-spectrograms (this may take a while)...")
         
-        train_subset, val_subset, test_subset = prepare_plain_datasets()
+        speech_dataset, noise_dataset, train_subset, val_subset, test_subset = prepare_plain_datasets(
+            target_labels=target_labels,
+            noise_dataset_path=noise_dataset_path,
+            splits=dataset_split
+        )
         
         noise_transform = RandomNoise(noise_dataset, noise_alpha)
         fix_length_transform = FixAudioLength(16000)
@@ -293,10 +344,19 @@ def prepare_spectrogram_loaders(
             hop_length=hop_length,
         )
 
+        all_labels = target_labels if target_labels is not None else sorted(
+            list(set(
+                path.split(os.sep)[-2]
+                for path in speech_dataset._walker
+            ))
+        )
+
+        label2idx = {label: i for i, label in enumerate(all_labels)}
+
         # --- UPDATED SECTION START ---
         # Explicitly define the 10 target keywords used in the CNN model
-        target_labels = ['down', 'go', 'left', 'no', 'off', 'on', 'right', 'stop', 'up', 'yes']
-        label2idx = {label: i for i, label in enumerate(target_labels)}
+        # target_labels = ['down', 'go', 'left', 'no', 'off', 'on', 'right', 'stop', 'up', 'yes']
+        # label2idx = {label: i for i, label in enumerate(target_labels)}
         # --- UPDATED SECTION END ---
 
         def compute_mels(subset, apply_noise):
@@ -305,8 +365,8 @@ def prepare_spectrogram_loaders(
             for waveform, sample_rate, label, *_ in (speech_dataset[i] for i in subset.indices):
                 # --- ADDED FILTERING START ---
                 # Only process if the word is in our 10-target list
-                if label not in target_labels:
-                    continue
+                # if label not in target_labels:
+                #     continue
                 # --- ADDED FILTERING END ---
 
                 if nr % 100 == 0:
@@ -325,9 +385,9 @@ def prepare_spectrogram_loaders(
         print("Computing Training Mels")
         train_mels, train_labels = compute_mels(train_subset, apply_noise=True)
         print("Computing Validation Mels")
-        val_mels, val_labels = compute_mels(val_subset, apply_noise=False)
+        val_mels, val_labels = compute_mels(val_subset, apply_noise=apply_noise_to_val_test)
         print("Computing Test Mels")
-        test_mels, test_labels = compute_mels(test_subset, apply_noise=True)
+        test_mels, test_labels = compute_mels(test_subset, apply_noise=apply_noise_to_val_test)
 
         if precompute:
             torch.save(train_mels, train_file)
@@ -357,7 +417,7 @@ def prepare_raw_loaders(noise_alpha = 0, batch_size = 1000):
     subsets = prepare_plain_datasets()
 
     train_transforms = nn.Sequential(
-        RandomNoise(noise_dataset, noise_alpha),
+        RandomNoise(subsets[0], noise_alpha),
         FixAudioLength(16000),
     )
 
