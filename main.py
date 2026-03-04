@@ -19,9 +19,9 @@ def train_and_test_model(
     noise_dataset_path = "./noise_dataset",
     learning_rate=1e-3,
     num_epochs=20,
-    batch_size=64
+    batch_size=64,
+    device="cpu"
 ):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     torch.set_default_device(device)
 
@@ -84,19 +84,22 @@ def create_cnn_fn(num_classes=10):
     
 
 def main():
-    # === Arguments ===
+    ### === Arguments ===
     noise_dataset_path="./noise_dataset"
-
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     target_labels = ['down', 'go', 'left', 'no', 'off', 'on', 'right', 'stop', 'up', 'yes']
+
     # create_fn = create_rnn_fn(num_classes=len(target_labels))    
     create_fn = create_cnn_fn(num_classes=len(target_labels))    
-    # === End Arguments ===
+
+    ### === End Arguments ===
 
     outputs = train_and_test_model(
         create_fn,
         target_labels=target_labels,
-        noise_dataset_path=noise_dataset_path
+        noise_dataset_path=noise_dataset_path,
+        device=device
     )
 
     plot_confusion_matrix(outputs[0][4], target_labels)

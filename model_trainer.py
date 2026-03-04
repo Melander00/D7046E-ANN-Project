@@ -7,11 +7,16 @@ import torch
 def train_epoch(model, criterion, optimizer, train_loader, epoch_number):
     model.train()
 
+    device = next(model.parameters()).device
+
     total_loss=0
     correct=0
     guesses=0
 
     for batch_nr, (inputs, labels) in enumerate(train_loader):
+        inputs = inputs.to(device)
+        labels = labels.to(labels)
+
         prediction = model(inputs)
 
         loss = criterion(prediction, labels)
@@ -38,12 +43,17 @@ def train_epoch(model, criterion, optimizer, train_loader, epoch_number):
 def validate_epoch(model, criterion, val_loader, epoch_number):
     model.eval()
 
+    device = next(model.parameters()).device
+
     total_loss=0
     correct=0
     guesses=0
 
     with torch.no_grad():
         for batch_nr, (inputs, labels) in enumerate(val_loader):
+            inputs = inputs.to(device)
+            labels = labels.to(labels)
+
             prediction = model(inputs)
 
             loss = criterion(prediction, labels)
@@ -95,6 +105,8 @@ def train_model(model, criterion, optimizer, train_loader, val_loader, num_epoch
 def test_model(model, test_loader):
     model.eval()
     
+    device = next(model.parameters()).device
+    
     correct=0
     guesses=0
 
@@ -103,6 +115,9 @@ def test_model(model, test_loader):
 
     with torch.no_grad():
         for batch_nr, (inputs, labels) in enumerate(test_loader):
+            inputs = inputs.to(device)
+            labels = labels.to(labels)
+
             prediction = model(inputs)
             guess = torch.argmax(prediction, dim=1)
             correct += (guess == labels).sum().item()
