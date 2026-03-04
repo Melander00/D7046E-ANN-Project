@@ -1,9 +1,12 @@
 noise_dataset
 *.tar
 *.gz
+*.whl
 SpeechCommands
 .venv*
 
 __pycache__
 
 precompute
+
+ESC-50-master

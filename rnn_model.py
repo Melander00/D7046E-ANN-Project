@@ -1,10 +1,13 @@
+import os
+import shutil
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
 from data_preprocessing import prepare_spectrogram_loaders
-from model_trainer import train_model, test_model
-import os
-import shutil
+from model_trainer import test_model, train_model
+
 
 # 1. Define the LSTM Architecture
 class RNNCommand(nn.Module):
@@ -63,5 +66,44 @@ def main():
     torch.save(model.state_dict(), "rnn_speech_commands_final.pth")
     print("\nFinal model saved.")
 
+
+
+
+def main_multiple_training():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+    torch.set_default_device(device)
+
+    # Train on multiple noise levels
+    noise_levels = [0.0, 0.1, 0.5]
+    for alpha in noise_levels:
+        print(f"\n\n === Noise Level {alpha} ===")
+
+        model = RNNCommand(input_size=64, hidden_size=68, num_layers=2, num_classes=10).to(device)
+        params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"RNN trainable params: {params}")
+
+        train_loader, val_loader, test_loader = prepare_spectrogram_loaders(
+            batch_size=64, 
+            n_mels=64, 
+            noise_alpha=alpha,
+            target_labels = ['down', 'go', 'left', 'no', 'off', 'on', 'right', 'stop', 'up', 'yes'],
+            noise_dataset_path="./noise_dataset",
+            precompute=True
+        )
+
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+        best_model, losses, accuracies = train_model(model, criterion, optimizer, train_loader, val_loader, 20)
+
+        test_accuracy, cm = test_model(best_model, test_loader)
+        print(f"Test Accuracy: {test_accuracy:.4f}")
+        print("Confusion Matrix:")
+        print(cm)
+    pass
+
+
 if __name__ == "__main__":
-    main()
+    # main()
+    main_multiple_training()

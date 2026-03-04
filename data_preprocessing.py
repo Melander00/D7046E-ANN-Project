@@ -183,7 +183,7 @@ def prepare_plain_datasets(
         speech_dataset = Subset(speech_dataset, indices)
         print("Filtering complete")
 
-    generator = torch.Generator(device=device).manual_seed(1)
+    generator = torch.Generator().manual_seed(1)
     
     train_subset, val_subset, test_subset = torch.utils.data.random_split(
         speech_dataset,
@@ -231,6 +231,8 @@ def prepare_spectrogram_loaders(
         n_fft=1024,
         hop_length=512,
         n_mels=64,
+        f_min=20,
+        f_max=8000,
         noise_alpha=0,
         precompute=False,
         precompute_dir="./precompute",
@@ -260,16 +262,17 @@ def prepare_spectrogram_loaders(
         train_labels_file, val_labels_file, test_labels_file
     ]):
         print("Loading precomputed Mel-spectrograms from disk...")
-        train_dataset = PrecomputedMelDataset(train_file, train_labels_file)
-        val_dataset = PrecomputedMelDataset(val_file, val_labels_file)
-        test_dataset = PrecomputedMelDataset(test_file, test_labels_file)
+        train_dataset = PrecomputedMelDataset(train_file, train_labels_file, device=device)
+        val_dataset = PrecomputedMelDataset(val_file, val_labels_file, device=device)
+        test_dataset = PrecomputedMelDataset(test_file, test_labels_file, device=device)
     else:
         print("Computing Mel-spectrograms (this may take a while)...")
         
         speech_dataset, noise_dataset, train_subset, val_subset, test_subset = prepare_plain_datasets(
             target_labels=target_labels,
             noise_dataset_path=noise_dataset_path,
-            splits=dataset_split
+            splits=dataset_split,
+            device=device
         )
         
         noise_transform = RandomNoise(noise_dataset, noise_alpha).to(device)
@@ -279,7 +282,12 @@ def prepare_spectrogram_loaders(
             n_fft=n_fft,
             n_mels=n_mels,
             hop_length=hop_length,
+            f_min=f_min,
+            f_max=f_max,
+            power=2.0
         ).to(device)
+
+        db_transform = transforms.AmplitudeToDB(stype="power").to(device)
 
         all_labels = target_labels if target_labels is not None else sorted(
             list(set(
@@ -313,6 +321,8 @@ def prepare_spectrogram_loaders(
                     waveform = noise_transform(waveform).to(device)
                 waveform = fix_length_transform(waveform).to(device)
                 mel = mel_transform(waveform).to(device)
+                mel = db_transform(mel)
+                mel = (mel - mel.mean()) / (mel.std() + 1e-6)
                 mels.append(mel)
                 labels.append(label2idx[label])
                 nr += 1
@@ -339,9 +349,9 @@ def prepare_spectrogram_loaders(
         val_dataset = torch.utils.data.TensorDataset(val_mels, val_labels)
         test_dataset = torch.utils.data.TensorDataset(test_mels, test_labels)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     return train_loader, val_loader, test_loader
 

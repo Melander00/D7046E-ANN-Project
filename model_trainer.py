@@ -15,7 +15,7 @@ def train_epoch(model, criterion, optimizer, train_loader, epoch_number):
 
     for batch_nr, (inputs, labels) in enumerate(train_loader):
         inputs = inputs.to(device)
-        labels = labels.to(labels)
+        labels = labels.to(device)
 
         prediction = model(inputs)
 
@@ -52,7 +52,7 @@ def validate_epoch(model, criterion, val_loader, epoch_number):
     with torch.no_grad():
         for batch_nr, (inputs, labels) in enumerate(val_loader):
             inputs = inputs.to(device)
-            labels = labels.to(labels)
+            labels = labels.to(device)
 
             prediction = model(inputs)
 
@@ -78,6 +78,9 @@ def train_model(model, criterion, optimizer, train_loader, val_loader, num_epoch
 
     train_accuracies = []
     val_accuracies = []
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
 
     for epoch in range(num_epochs):
         train_loss, train_accuracy = train_epoch(model, criterion, optimizer, train_loader, epoch)
@@ -116,7 +119,7 @@ def test_model(model, test_loader):
     with torch.no_grad():
         for batch_nr, (inputs, labels) in enumerate(test_loader):
             inputs = inputs.to(device)
-            labels = labels.to(labels)
+            labels = labels.to(device)
 
             prediction = model(inputs)
             guess = torch.argmax(prediction, dim=1)
