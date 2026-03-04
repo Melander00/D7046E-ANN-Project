@@ -1,10 +1,20 @@
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
 
 
-def plot_confusion_matrix(cm, class_names):
+def plot_confusion_matrix(
+    cm, 
+    class_names,
+    save=True,
+    save_dir="./output/",
+    save_name="confusion_matrix.png",
+    show=False,
+):
     fig, ax = plt.subplots()
-    fig.set_size_inches(3, 3)
+    num_classes = max(3, len(class_names) * 1)
+    fig.set_size_inches(num_classes, num_classes)
 
     cm_normalized = cm.float() / cm.sum(dim=1, keepdim=True)
 
@@ -28,4 +38,7 @@ def plot_confusion_matrix(cm, class_names):
                     ha="center", va="center", color=("black" if cm_normalized[i, j].item() > 0.2 else "white"))
 
     plt.tight_layout()
-    plt.show()
+    if show:
+        plt.show()
+    if save:
+        plt.savefig(os.path.join(save_dir, save_name))

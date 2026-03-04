@@ -238,7 +238,9 @@ def prepare_spectrogram_loaders(
         dataset_split=[0.7,0.15,0.15],
         noise_dataset_path="./noise_dataset/audio",
         apply_noise_to_val_test=True,
-        device="cpu"
+        device="cpu",
+        f_min=20,
+        f_max=8000,
     ):
     """
     Prepare train/val/test loaders with optional precompute.
@@ -269,7 +271,8 @@ def prepare_spectrogram_loaders(
         speech_dataset, noise_dataset, train_subset, val_subset, test_subset = prepare_plain_datasets(
             target_labels=target_labels,
             noise_dataset_path=noise_dataset_path,
-            splits=dataset_split
+            splits=dataset_split,
+            device=device
         )
         
         noise_transform = RandomNoise(noise_dataset, noise_alpha).to(device)
@@ -277,9 +280,14 @@ def prepare_spectrogram_loaders(
         mel_transform = transforms.MelSpectrogram(
             sample_rate=16000,
             n_fft=n_fft,
+            #f_min=f_min,
+            #f_max=f_max,
             n_mels=n_mels,
             hop_length=hop_length,
+            power=2.0,
         ).to(device)
+
+        db_transforms = transforms.AmplitudeToDB(stype="power").to(device)
 
         all_labels = target_labels if target_labels is not None else sorted(
             list(set(
@@ -313,6 +321,8 @@ def prepare_spectrogram_loaders(
                     waveform = noise_transform(waveform).to(device)
                 waveform = fix_length_transform(waveform).to(device)
                 mel = mel_transform(waveform).to(device)
+                mel = db_transforms(mel)
+                mel = (mel - mel.mean()) / (mel.std() + 1e-6)
                 mels.append(mel)
                 labels.append(label2idx[label])
                 nr += 1
@@ -339,9 +349,9 @@ def prepare_spectrogram_loaders(
         val_dataset = torch.utils.data.TensorDataset(val_mels, val_labels)
         test_dataset = torch.utils.data.TensorDataset(test_mels, test_labels)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     return train_loader, val_loader, test_loader
 
