@@ -3,6 +3,9 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+
+from graph_handler import plot_confusion_matrix
 
 
 def plot_graph(
@@ -43,6 +46,8 @@ def plot_graph(
     if save:
         plt.savefig(os.path.join(save_dir, name))
         print(f"Saved {name} to {save_dir}")
+
+
 
 def load_model_json(filename, file_dir = "./output"):
     with open(os.path.join(file_dir, filename), "r") as file:
@@ -97,6 +102,27 @@ def plot_accuracies(data, save_dir="", save=False):
         name=name,
     )
 
+def plot_cm(data, save_dir="", save=False):
+    cm = data["cm"]
+    model = data["model"]
+    alpha = data["alpha"]
+    labels = data["labels"]
+
+    name = f"{model}_cm_{alpha}.png"
+
+    cm = torch.tensor(cm)
+
+    plot_confusion_matrix(
+        cm,
+        labels,
+        save=save,
+        save_dir=save_dir,
+        save_name=name,
+        show=False
+    )
+
+    pass
+
 def plot_all_files_in_dir(dir, save_dir="", save=False):
     everything = os.listdir(dir)
     for file_path in everything:
@@ -104,12 +130,12 @@ def plot_all_files_in_dir(dir, save_dir="", save=False):
             data = load_model_json(file_path, dir)
             plot_losses(data, save_dir=save_dir, save=save)
             plot_accuracies(data, save_dir=save_dir, save=save)
+            plot_cm(data, save_dir=save_dir, save=save)
 
 
 def main():
     img_dir = "./img"
     data_dir = "./output"
-
     os.makedirs(img_dir, exist_ok=True)
 
     plot_all_files_in_dir(data_dir, save_dir=img_dir, save=True)
