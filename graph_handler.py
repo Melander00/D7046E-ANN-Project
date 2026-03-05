@@ -11,12 +11,16 @@ def plot_confusion_matrix(
     save_dir="./output/",
     save_name="confusion_matrix.png",
     show=False,
+    title="Confusion Matrix"
 ):
     fig, ax = plt.subplots()
     num_classes = max(3, len(class_names) * 1)
     fig.set_size_inches(num_classes, num_classes)
 
-    cm_normalized = cm.float() / cm.sum(dim=1, keepdim=True)
+    row_sums = cm.sum(dim=1, keepdim=True).float()
+    row_sums[row_sums == 0] = 1  # avoid division by zero
+    cm_normalized = cm.float() / row_sums
+    # cm_normalized = cm.float() / cm.sum(dim=1, keepdim=True)
 
     im = ax.imshow(cm_normalized)
 
@@ -24,7 +28,7 @@ def plot_confusion_matrix(
 
     ax.set_xlabel("Predicted")
     ax.set_ylabel("True")
-    ax.set_title("Confusion Matrix")
+    ax.set_title(title)
 
     ax.set_xticks(np.arange(len(class_names)))
     ax.set_yticks(np.arange(len(class_names)))

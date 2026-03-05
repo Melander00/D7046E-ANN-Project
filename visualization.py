@@ -109,6 +109,7 @@ def plot_cm(data, save_dir="", save=False):
     labels = data["labels"]
 
     name = f"{model}_cm_{alpha}.png"
+    title = f"{model.upper()} CM for alpha={alpha}"
 
     cm = torch.tensor(cm)
 
@@ -118,7 +119,8 @@ def plot_cm(data, save_dir="", save=False):
         save=save,
         save_dir=save_dir,
         save_name=name,
-        show=False
+        show=False,
+        title=title,
     )
 
     pass
